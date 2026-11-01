@@ -1,0 +1,75 @@
+﻿name: Export complete source snapshot
+
+on:
+  push:
+    branches:
+      - bundle/claude-source-40eb286
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out PS5 source and pinned Eglantine core
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+          persist-credentials: false
+
+      - name: Verify pinned core revision
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD:Eglantine)" = "b40ad217ab829226841cb71f6e4c5cb05977a225"
+          test "$(git -C Eglantine rev-parse HEAD)" = "b40ad217ab829226841cb71f6e4c5cb05977a225"
+          test -f Eglantine/src/core/core.cpp
+          test -f tools/eglantine-patches/0003-ps5-system-load-romfs-diagnostics.patch
+
+      - name: Package complete source snapshot
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, subprocess, zipfile
+          root = pathlib.Path.cwd()
+          out = root / 'EglantinePS5-Source-40eb286.zip'
+          sha = '40eb286c96ee568b8ac8efab49fd25aeb392bfe8'
+          core_sha = 'b40ad217ab829226841cb71f6e4c5cb05977a225'
+          count = 0
+          with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED, compresslevel=6, allowZip64=True) as z:
+              for repo, prefix in ((root, ''), (root / 'Eglantine', 'Eglantine/')):
+                  paths = subprocess.check_output(['git', '-C', str(repo), 'ls-files', '-z']).split(b'\0')
+                  for raw in paths:
+                      if not raw:
+                          continue
+                      relative = os.fsdecode(raw)
+                      path = repo / relative
+                      if not path.is_file() or path.is_symlink():
+                          continue
+                      z.write(path, prefix + pathlib.PurePath(relative).as_posix())
+                      count += 1
+              z.writestr('LEGGIMI-PER-CLAUDE.txt', f'''EglantinePS5 source snapshot, including fully populated Eglantine core.
+          PS5 frontend base commit: {sha}
+          Core submodule exact commit: {core_sha}
+          Source export workflow adds no application source changes to {sha}.
+          Build produced by GitHub Actions run: 41267770014, artifact 13068302022.
+          This snapshot includes tools/eglantine-patches/0003-ps5-system-load-romfs-diagnostics.patch.
+          Patches are applied to Eglantine by tools/apply-eglantine-patches.sh during build.
+          This is the DIAGNOSTIC version, not a confirmed fix for black screen.
+          It includes no game dumps, private keys, or proprietary firmware.
+          ''')
+          with zipfile.ZipFile(out) as z:
+              assert z.testzip() is None
+              needed = ['Eglantine/src/core/core.cpp', 'Eglantine/src/core/loader/deconstructed_rom_directory.cpp', 'headless/main.cpp', 'tools/eglantine-patches/0003-ps5-system-load-romfs-diagnostics.patch']
+              for name in needed:
+                  assert name in z.namelist(), f'Missing: {name}'
+          print('Exported', count, 'tracked files to', out.name, 'size', out.stat().st_size)
+          PY
+
+      - name: Upload complete source ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: EglantinePS5-Source-Complete-40eb286
+          path: EglantinePS5-Source-40eb286.zip
+          if-no-files-found: error
+          retention-days: 7
