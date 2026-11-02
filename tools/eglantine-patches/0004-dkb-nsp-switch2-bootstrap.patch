@@ -1,0 +1,107 @@
+diff --git a/src/core/core.cpp b/src/core/core.cpp
+index 41871df870..4a81b9b7d3 100644
+--- a/src/core/core.cpp
++++ b/src/core/core.cpp
+@@ -24,12 +24,15 @@
+ #include "core/cpu_manager.h"
+ #include "core/debugger/debugger.h"
+ #include "core/device_memory.h"
++#include "core/file_sys/card_image.h"
++#include "core/file_sys/content_archive.h"
+ #include "core/file_sys/fs_filesystem.h"
+ #include "core/file_sys/patch_manager.h"
+ #include "core/file_sys/program_metadata.h"
+ #include "core/file_sys/registered_cache.h"
+ #include "core/file_sys/romfs_factory.h"
+ #include "core/file_sys/savedata_factory.h"
++#include "core/file_sys/submission_package.h"
+ #include "core/file_sys/vfs/vfs_concat.h"
+ #include "core/file_sys/vfs/vfs_real.h"
+ #include "core/gpu_dirty_memory_manager.h"
+@@ -114,15 +117,72 @@ FileSys::VirtualFile GetGameFileFromPath(const FileSys::VirtualFilesystem& vfs,
+ 
+ namespace {
+ 
+-// Switch 2 titles boot as a loose ExeFS, with main.npdm next to main.
+-bool IsSwitch2Program(const FileSys::VirtualFile& file) {
+-    const auto dir = file != nullptr ? file->GetContainingDirectory() : nullptr;
+-    const auto npdm = dir != nullptr ? dir->GetFile("main.npdm") : nullptr;
++// Detect the program's Switch 2 NPDM *before* kernel initialization. Testing only
++// file->GetContainingDirectory() works for a loose ExeFS/main but not NSP/XCI/NCA:
++// the containing directory of a container is the host game-list folder.
++bool IsSwitch2ExeFS(const FileSys::VirtualDir& exefs) {
++    const auto npdm = exefs != nullptr ? exefs->GetFile("main.npdm") : nullptr;
+     FileSys::ProgramMetadata metadata;
+     return npdm != nullptr && metadata.Load(npdm) == Loader::ResultStatus::Success &&
+            metadata.IsSwitch2();
+ }
+ 
++bool IsSwitch2Nsp(const FileSys::NSP& nsp) {
++    if (nsp.GetStatus() != Loader::ResultStatus::Success) {
++        return false;
++    }
++    if (nsp.IsExtractedType()) {
++        return IsSwitch2ExeFS(nsp.GetExeFS());
++    }
++    const u64 title_id = nsp.GetProgramTitleID();
++    if (title_id == 0) {
++        return false;
++    }
++    const auto program = nsp.GetNCA(title_id, FileSys::ContentRecordType::Program);
++    return program != nullptr && program->GetStatus() == Loader::ResultStatus::Success &&
++           IsSwitch2ExeFS(program->GetExeFS());
++}
++
++bool IsSwitch2Program(const FileSys::VirtualFile& file, u64 program_id,
++                      std::size_t program_index) {
++    if (file == nullptr) {
++        return false;
++    }
++    if (IsSwitch2ExeFS(file->GetContainingDirectory())) {
++        return true;
++    }
++
++    switch (Loader::GuessFromFilename(file->GetName())) {
++    case Loader::FileType::NCA: {
++        FileSys::NCA nca{file};
++        return nca.GetStatus() == Loader::ResultStatus::Success &&
++               IsSwitch2ExeFS(nca.GetExeFS());
++    }
++    case Loader::FileType::NSP:
++    case Loader::FileType::NSZ: {
++        const FileSys::NSP nsp{file, program_id, program_index};
++        return IsSwitch2Nsp(nsp);
++    }
++    case Loader::FileType::XCI:
++    case Loader::FileType::XCZ: {
++        FileSys::XCI xci{file, program_id, program_index};
++        if (xci.GetStatus() == Loader::ResultStatus::Success) {
++            if (const auto partition = xci.GetSecurePartitionNSP()) {
++                return IsSwitch2Nsp(*partition);
++            }
++        }
++        // PFS0-shaped .xcz files are dispatched to the NSP loader.
++        if (Loader::GuessFromFilename(file->GetName()) == Loader::FileType::XCZ) {
++            const FileSys::NSP nsp{file, program_id, program_index};
++            return IsSwitch2Nsp(nsp);
++        }
++        return false;
++    }
++    default:
++        return false;
++    }
++}
++
+ } // namespace
+ 
+ struct System::Impl {
+@@ -317,7 +377,8 @@ struct System::Impl {
+ 
+         const bool switch2_program =
+             virtual_filesystem != nullptr &&
+-            IsSwitch2Program(GetGameFileFromPath(virtual_filesystem, filepath));
++            IsSwitch2Program(GetGameFileFromPath(virtual_filesystem, filepath),
++                             params.program_id, params.program_index);
+         Settings::SetCurrentProgramIsSwitch2(switch2_program);
+         Settings::SetAstcRecompressionOverride(std::nullopt);
+ 
