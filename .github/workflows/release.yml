@@ -25,6 +25,8 @@ name: Release build
 on:
   # A build on main is started by hand (Run workflow): pushes to main build nothing.
   push:
+    branches:
+      - fix/dkb-nsp-switch2-bootstrap
     tags: ['v*']
   pull_request:
   workflow_dispatch:
